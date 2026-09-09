@@ -1,0 +1,87 @@
+<?php
+
+namespace App\Modules\Applications\Resources;
+
+use App\Support\CitizenCatalogLabel;
+use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
+use Illuminate\Http\Resources\Json\JsonResource;
+
+/** @mixin \App\Models\LicenseApplication */
+class ApplicationResource extends JsonResource
+{
+    /**
+     * @return array<string, mixed>
+     */
+    public function toArray(Request $request): array
+    {
+        return [
+            'id' => $this->id,
+            'application_number' => $this->application_number,
+            'status' => $this->status->value,
+            'license_type' => $this->whenLoaded('licenseType', function () {
+                return [
+                    'id' => $this->licenseType->id,
+                    'name' => CitizenCatalogLabel::licenseType(
+                        (string) $this->licenseType->code,
+                        $this->licenseType->name
+                    ),
+                    'code' => $this->licenseType->code,
+                ];
+            }),
+            'service_type' => $this->whenLoaded('serviceType', function () {
+                return [
+                    'id' => $this->serviceType->id,
+                    'name' => CitizenCatalogLabel::serviceType(
+                        (string) $this->serviceType->code,
+                        $this->serviceType->name
+                    ),
+                    'code' => $this->serviceType->code,
+                ];
+            }),
+            'related_license' => $this->whenLoaded('relatedLicense', function () {
+                if ($this->relatedLicense === null) {
+                    return null;
+                }
+
+                return [
+                    'id' => $this->relatedLicense->id,
+                    'license_number' => $this->relatedLicense->license_number,
+                    'status' => $this->relatedLicense->status->value,
+                    'issue_date' => $this->relatedLicense->issue_date?->format('Y-m-d'),
+                    'expiry_date' => $this->relatedLicense->expiry_date?->format('Y-m-d'),
+                ];
+            }),
+            'related_license_id' => $this->related_license_id,
+            'current_test_type' => $this->whenLoaded('currentTestType', function () {
+                if ($this->currentTestType === null) {
+                    return null;
+                }
+
+                return [
+                    'id' => $this->currentTestType->id,
+                    'name' => CitizenCatalogLabel::testType(
+                        (string) $this->currentTestType->code,
+                        $this->currentTestType->name
+                    ),
+                    'code' => $this->currentTestType->code,
+                ];
+            }),
+            'rejection_reason' => $this->rejection_reason,
+            'submitted_at' => $this->submitted_at?->toIso8601String(),
+            'approved_at' => $this->approved_at?->toIso8601String(),
+            'issued_at' => $this->issued_at?->toIso8601String(),
+            'created_at' => $this->created_at?->toIso8601String(),
+            'updated_at' => $this->updated_at?->toIso8601String(),
+            'documents' => $this->whenLoaded('applicationDocuments', function () {
+                /** @var Collection<int, \App\Models\ApplicationDocument> $docs */
+                $docs = $this->applicationDocuments;
+
+                return $docs
+                    ->map(fn ($doc) => (new ApplicationDocumentResource($doc))->resolve())
+                    ->values()
+                    ->all();
+            }),
+        ];
+    }
+}

@@ -1,0 +1,304 @@
+<?php
+
+namespace App\Modules\AIAgent\Services;
+
+use App\Enums\ApplicationStatus;
+use App\Models\LicenseApplication;
+use App\Models\User;
+use App\Modules\AIAgent\Enums\AgentIntent;
+use App\Modules\AIAgent\Models\AIAgentSession;
+use App\Modules\AIAgent\Support\AgentCatalogLocalizer;
+use App\Modules\AIAgent\Support\AgentTranslator;
+use App\Modules\AIAgent\Support\ApplicationStatusLabelMapper;
+use App\Modules\AIAgent\Support\LicenseTypeSlotExtractor;
+use App\Modules\Applications\Support\ServiceWorkflow;
+use Illuminate\Support\Collection;
+
+class AgentApplicationNextStepService
+{
+    public function __construct(
+        private readonly AgentSessionContextService $sessionContext,
+    ) {}
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function buildPayload(User $citizen, AIAgentSession $session, string $language = 'ar'): array
+    {
+        $resolution = $this->resolveTargetApplication($citizen, $session);
+
+        if ($resolution === null) {
+            return $this->basePayload($language, [
+                'reply' => AgentTranslator::message('ai_agent.application_next_step.no_applications'),
+                'proposed_action' => null,
+            ]);
+        }
+
+        if ($resolution instanceof Collection) {
+            return $this->basePayload($language, [
+                'reply' => AgentTranslator::message('ai_agent.application_next_step.multiple_applications', [
+                    'summary' => $this->formatApplicationList($resolution, $language),
+                ]),
+                'proposed_action' => null,
+                'missing_slots' => ['application_choice'],
+            ]);
+        }
+
+        $step = $this->nextStepForApplication($resolution, $language);
+
+        return $this->basePayload($language, [
+            'reply' => $step['reply'],
+            'proposed_action' => [
+                'name' => 'get_application_next_step',
+                'arguments' => [
+                    'application_id' => $resolution->id,
+                ],
+            ],
+            'suggested_action' => $step['suggested_action'] ?? null,
+        ]);
+    }
+
+    public function nextStepMessageForStatus(string $status, ?string $language = null): string
+    {
+        $normalized = trim($status);
+        $language = $language ?? AgentTranslator::getLocale();
+
+        if ($normalized === '') {
+            return AgentTranslator::message('ai_agent.application_next_step.unknown', [], $language);
+        }
+
+        $key = 'ai_agent.application_next_step.'.$normalized;
+        $message = AgentTranslator::message($key, [], $language);
+
+        if (str_starts_with($message, 'messages.')) {
+            return AgentTranslator::message('ai_agent.application_next_step.unknown', [], $language);
+        }
+
+        return $message;
+    }
+
+    public function nextStepMessageForApplication(LicenseApplication $application, string $language = 'ar'): string
+    {
+        $application->loadMissing('serviceType');
+        $status = $application->status instanceof ApplicationStatus
+            ? $application->status
+            : ApplicationStatus::tryFrom((string) $application->status) ?? ApplicationStatus::Draft;
+
+        if (ServiceWorkflow::usesUnblockWorkflow($application->serviceType?->code)) {
+            if ($status === ApplicationStatus::Approved) {
+                return AgentTranslator::message('ai_agent.application_next_step.license_unblock.approved', [], $language);
+            }
+
+            if ($status === ApplicationStatus::Completed) {
+                return AgentTranslator::message('ai_agent.application_next_step.license_unblock.completed', [], $language);
+            }
+        }
+
+        $replace = [];
+        if ($status === ApplicationStatus::Rejected) {
+            $reason = trim((string) ($application->rejection_reason ?? ''));
+            if ($reason !== '') {
+                return AgentTranslator::message('ai_agent.application_next_step.rejected_with_reason', [
+                    'reason' => $reason,
+                ], $language);
+            }
+        }
+
+        $key = 'ai_agent.application_next_step.'.$status->value;
+        $message = AgentTranslator::message($key, $replace, $language);
+
+        if (str_starts_with($message, 'messages.')) {
+            return AgentTranslator::message('ai_agent.application_next_step.unknown', [], $language);
+        }
+
+        return $message;
+    }
+
+    /**
+     * @return array{reply: string, next_step_key: string, next_step_message: string, suggested_action: string|null, status: string, status_label_ar: string, status_label_en?: string}
+     */
+    public function nextStepForApplication(LicenseApplication $application, string $language = 'ar'): array
+    {
+        $status = $application->status instanceof ApplicationStatus
+            ? $application->status
+            : ApplicationStatus::tryFrom((string) $application->status) ?? ApplicationStatus::Draft;
+
+        $key = $status->value;
+        $statusLabel = $language === 'en'
+            ? ApplicationStatusLabelMapper::labelEn($status)
+            : ApplicationStatusLabelMapper::labelAr($status);
+        $message = $this->nextStepMessageForApplication($application, $language);
+
+        if ($language === 'en') {
+            return [
+                'reply' => "Application {$application->application_number} ({$statusLabel}). {$message}",
+                'next_step_key' => $key,
+                'next_step_message' => $message,
+                'suggested_action' => $this->suggestedActionForApplication($application),
+                'status' => $status->value,
+                'status_label_ar' => ApplicationStatusLabelMapper::labelAr($status),
+                'status_label_en' => $statusLabel,
+            ];
+        }
+
+        return [
+            'reply' => $message,
+            'next_step_key' => $key,
+            'next_step_message' => $message,
+            'suggested_action' => $this->suggestedActionForApplication($application),
+            'status' => $status->value,
+            'status_label_ar' => $statusLabel,
+            'status_label_en' => ApplicationStatusLabelMapper::labelEn($status),
+        ];
+    }
+
+    /**
+     * @return array{reply: string, status_label_ar: string}
+     */
+    public function statusReplyWithNextStep(LicenseApplication $application, string $language = 'ar'): array
+    {
+        $step = $this->nextStepForApplication($application, $language);
+
+        if ($language === 'en') {
+            $statusLabel = (string) ($step['status_label_en'] ?? $step['status_label_ar']);
+
+            return [
+                'reply' => AgentTranslator::message('ai_agent.application_status.with_next_step', [
+                    'number' => $application->application_number,
+                    'status' => $statusLabel,
+                    'next_step' => $step['next_step_message'],
+                ], 'en'),
+                'status_label_ar' => (string) $step['status_label_ar'],
+            ];
+        }
+
+        return [
+            'reply' => AgentTranslator::message('ai_agent.application_status.with_next_step', [
+                'number' => $application->application_number,
+                'status' => $step['status_label_ar'],
+                'next_step' => $step['next_step_message'],
+            ], 'ar'),
+            'status_label_ar' => $step['status_label_ar'],
+        ];
+    }
+
+    /**
+     * @return LicenseApplication|Collection<int, LicenseApplication>|null
+     */
+    public function resolveTargetApplication(User $citizen, AIAgentSession $session): LicenseApplication|Collection|null
+    {
+        $applicationId = $this->sessionContext->resolveLastDiscussedApplicationId($session);
+
+        if ($applicationId !== null) {
+            $application = LicenseApplication::query()
+                ->where('citizen_id', $citizen->id)
+                ->whereKey($applicationId)
+                ->with(['licenseType', 'serviceType'])
+                ->first();
+
+            if ($application !== null) {
+                return $application;
+            }
+        }
+
+        $applications = LicenseApplication::query()
+            ->where('citizen_id', $citizen->id)
+            ->with(['licenseType', 'serviceType'])
+            ->orderByDesc('id')
+            ->get();
+
+        if ($applications->isEmpty()) {
+            return null;
+        }
+
+        $active = $applications->filter(
+            fn (LicenseApplication $application): bool => $application->status instanceof ApplicationStatus
+                ? $application->status->isActive()
+                : in_array((string) $application->status, ApplicationStatus::activeValues(), true)
+        )->values();
+
+        if ($active->count() === 1) {
+            return $active->first();
+        }
+
+        if ($active->count() > 1) {
+            return $active;
+        }
+
+        if ($applications->count() === 1) {
+            return $applications->first();
+        }
+
+        return $applications;
+    }
+
+    /**
+     * @param  array<string, mixed>  $overrides
+     * @return array<string, mixed>
+     */
+    private function basePayload(string $language, array $overrides): array
+    {
+        return array_merge([
+            'intent' => AgentIntent::GetApplicationNextStep->value,
+            'confidence' => 0.93,
+            'language' => $language,
+            'missing_slots' => [],
+            'requires_confirmation' => false,
+            'execute_immediately' => true,
+            'safety_status' => 'safe',
+            'requires_human_support' => false,
+        ], $overrides);
+    }
+
+    private function suggestedActionForApplication(LicenseApplication $application): ?string
+    {
+        $application->loadMissing('serviceType');
+        $status = $application->status instanceof ApplicationStatus
+            ? $application->status
+            : ApplicationStatus::tryFrom((string) $application->status) ?? ApplicationStatus::Draft;
+
+        if (! ServiceWorkflow::requiresTests($application->serviceType?->code)) {
+            return match ($status) {
+                ApplicationStatus::Draft, ApplicationStatus::DocumentsRejected => 'get_required_documents',
+                ApplicationStatus::PaymentPending => 'start_payment',
+                ApplicationStatus::LicenseIssued, ApplicationStatus::Completed => 'get_licenses',
+                default => null,
+            };
+        }
+
+        return match ($status) {
+            ApplicationStatus::Draft => 'get_required_documents',
+            ApplicationStatus::DocumentsRejected => 'get_required_documents',
+            ApplicationStatus::PaymentPending => 'start_payment',
+            ApplicationStatus::PaymentCompleted, ApplicationStatus::AppointmentPending => 'get_available_tests',
+            ApplicationStatus::WaitingRetest => 'get_appointment_slots',
+            ApplicationStatus::LicenseIssued, ApplicationStatus::Completed => 'get_licenses',
+            default => null,
+        };
+    }
+
+    /**
+     * @param  Collection<int, LicenseApplication>  $applications
+     */
+    private function formatApplicationList(Collection $applications, string $language): string
+    {
+        return $applications
+            ->map(function (LicenseApplication $application) use ($language): string {
+                $licenseLabel = AgentCatalogLocalizer::licenseType(
+                    (string) ($application->licenseType?->code ?? ''),
+                    null,
+                    $language
+                );
+                $statusLabel = $language === 'en'
+                    ? ApplicationStatusLabelMapper::labelEn($application->status)
+                    : ApplicationStatusLabelMapper::labelAr($application->status);
+
+                if ($language === 'en') {
+                    return '- '.$application->application_number.' ('.$licenseLabel.'): '.$statusLabel;
+                }
+
+                return '- '.$application->application_number.' — رخصة قيادة '.$licenseLabel.' — '.$statusLabel;
+            })
+            ->implode("\n");
+    }
+}

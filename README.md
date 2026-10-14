@@ -17,7 +17,7 @@
 </p>
 
 > [!IMPORTANT]
-> SYRTAK is an academic graduation project and is not affiliated with, endorsed by, or operated by any government authority. All public deployments must use synthetic demo data and non-government domains.
+> SYRTAK is an academic  project and is not affiliated with, endorsed by, or operated by any government authority. All public deployments must use synthetic demo data and non-government domains.
 
 ## Table of Contents
 
@@ -631,7 +631,7 @@ php artisan schedule:work
 
 ## Role and Acknowledgments
 
-### My Role — System Architect & Technical Lead
+### My Role — System Architect & Backend Developer
 
 My responsibilities centered on the system's technical direction and engineering coherence:
 
